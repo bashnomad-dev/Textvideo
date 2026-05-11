@@ -1,6 +1,7 @@
-"""Модуль скачивания аудио из ссылок через yt-dlp."""
+"""Модуль скачивания аудио и субтитров из ссылок через yt-dlp."""
 
 import asyncio
+import json
 import os
 import re
 import uuid
@@ -26,6 +27,81 @@ def extract_url(text: str) -> str | None:
     return match.group(0) if match else None
 
 
+async def fetch_subtitles(url: str, lang: str = "ru") -> tuple[str, str] | None:
+    """Пытается получить готовые субтитры из видео.
+
+    Returns:
+        (текст субтитров, название видео) или None если субтитров нет
+    """
+    os.makedirs(TEMP_DIR, exist_ok=True)
+    file_id = uuid.uuid4().hex[:8]
+    sub_path = os.path.join(TEMP_DIR, file_id)
+
+    # Сначала получаем инфо о доступных субтитрах
+    cmd = [
+        "yt-dlp",
+        "--skip-download",
+        "--write-subs",
+        "--write-auto-subs",
+        "--sub-langs", f"{lang},en",
+        "--sub-format", "json3",
+        "--no-playlist",
+        "--print", "title",
+        "-o", sub_path,
+        url,
+    ]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+
+    if proc.returncode != 0:
+        return None
+
+    title = stdout.decode().strip().split("\n")[0] or "Без названия"
+
+    # Ищем скачанный файл субтитров
+    sub_file = None
+    for f in os.listdir(TEMP_DIR):
+        if f.startswith(file_id) and f.endswith(".json3"):
+            sub_file = os.path.join(TEMP_DIR, f)
+            break
+
+    if not sub_file or not os.path.exists(sub_file):
+        return None
+
+    try:
+        text = _parse_json3_subs(sub_file)
+        cleanup(sub_file)
+        if text and len(text.strip()) > 20:
+            return text, title
+    except Exception:
+        cleanup(sub_file)
+
+    return None
+
+
+def _parse_json3_subs(path: str) -> str:
+    """Парсит json3 субтитры в чистый текст без дубликатов."""
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    segments = []
+    prev_text = ""
+    for event in data.get("events", []):
+        parts = event.get("segs", [])
+        line = "".join(s.get("utf8", "") for s in parts).strip()
+        # json3 авто-субтитры часто дублируют строки
+        if line and line != prev_text and line != "\n":
+            segments.append(line)
+            prev_text = line
+
+    return " ".join(segments)
+
+
 async def download_audio(url: str) -> tuple[str, str]:
     """Скачивает аудио из URL через yt-dlp.
 
@@ -43,7 +119,7 @@ async def download_audio(url: str) -> tuple[str, str]:
         "yt-dlp",
         "--extract-audio",
         "--audio-format", "mp3",
-        "--audio-quality", "5",  # средне-низкое качество для экономии
+        "--audio-quality", "5",
         "--max-filesize", f"{MAX_FILE_SIZE_MB}m",
         "--no-playlist",
         "--print", "title",
@@ -67,7 +143,6 @@ async def download_audio(url: str) -> tuple[str, str]:
     # Найти скачанный файл
     actual_path = os.path.join(TEMP_DIR, f"{file_id}.mp3")
     if not os.path.exists(actual_path):
-        # yt-dlp мог сохранить с другим расширением
         for f in os.listdir(TEMP_DIR):
             if f.startswith(file_id):
                 actual_path = os.path.join(TEMP_DIR, f)

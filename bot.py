@@ -11,7 +11,7 @@ from aiogram.enums import ParseMode
 
 from config import BOT_TOKEN, TEMP_DIR, MAX_FILE_SIZE_MB
 from transcriber import transcribe
-from downloader import extract_url, download_audio, cleanup
+from downloader import extract_url, fetch_subtitles, download_audio, cleanup
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -179,20 +179,31 @@ async def on_text(message: types.Message):
         )
         return
 
-    status = await message.reply("⏳ Скачиваю и распознаю...")
-    audio_path = None
+    status = await message.reply("⏳ Ищу субтитры...")
     try:
+        # Шаг 1: пробуем готовые субтитры (быстро и бесплатно)
+        result = await fetch_subtitles(url)
+        if result:
+            text, title = result
+            header = f"📝 <b>{title}</b>\n\n"
+            parts = split_text(header + text)
+            for i, part in enumerate(parts):
+                if i == 0:
+                    await message.reply(part, parse_mode=ParseMode.HTML)
+                else:
+                    await message.answer(part)
+            await status.delete()
+            return
+
+        # Шаг 2: субтитров нет — скачиваем аудио и транскрибируем
+        await status.edit_text("⏳ Субтитров нет, скачиваю аудио...")
         audio_path, title = await download_audio(url)
         await process_and_reply(message, audio_path, title)
     except ValueError as e:
         await message.reply(f"Ошибка: {e}")
-        if audio_path:
-            cleanup(audio_path)
     except Exception as e:
         log.exception("Ошибка обработки ссылки")
         await message.reply(f"Не удалось обработать ссылку: {e}")
-        if audio_path:
-            cleanup(audio_path)
     finally:
         try:
             await status.delete()
