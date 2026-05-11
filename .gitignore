@@ -1,0 +1,5 @@
+.env
+.deps/
+__pycache__/
+*.pyc
+/tmp/
