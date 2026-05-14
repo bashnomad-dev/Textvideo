@@ -1,8 +1,12 @@
 """Модуль транскрибации аудио через Groq или OpenAI Whisper API."""
 
+import asyncio
+import logging
 import os
 from openai import AsyncOpenAI
-from config import GROQ_API_KEY, OPENAI_API_KEY, TRANSCRIBE_PROVIDER
+from config import GROQ_API_KEY, OPENAI_API_KEY, TRANSCRIBE_PROVIDER, RETRY_MAX_ATTEMPTS, RETRY_BASE_DELAY
+
+log = logging.getLogger(__name__)
 
 
 def _get_client() -> AsyncOpenAI:
@@ -33,12 +37,24 @@ async def transcribe(file_path: str, language: str = "ru") -> str:
     client = _get_client()
     model = _get_model()
 
-    with open(file_path, "rb") as audio_file:
-        response = await client.audio.transcriptions.create(
-            model=model,
-            file=audio_file,
-            language=language,
-            response_format="text",
-        )
+    last_error = None
+    for attempt in range(1, RETRY_MAX_ATTEMPTS + 1):
+        try:
+            with open(file_path, "rb") as audio_file:
+                response = await client.audio.transcriptions.create(
+                    model=model,
+                    file=audio_file,
+                    language=language,
+                    response_format="text",
+                )
+            return response.strip() if isinstance(response, str) else response.text.strip()
+        except Exception as e:
+            last_error = e
+            if attempt < RETRY_MAX_ATTEMPTS:
+                delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                log.warning("Whisper API attempt %d/%d failed: %s. Retry in %.1fs", attempt, RETRY_MAX_ATTEMPTS, e, delay)
+                await asyncio.sleep(delay)
+            else:
+                log.error("Whisper API failed after %d attempts: %s", RETRY_MAX_ATTEMPTS, e)
 
-    return response.strip() if isinstance(response, str) else response.text.strip()
+    raise last_error

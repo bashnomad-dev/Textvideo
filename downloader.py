@@ -7,7 +7,7 @@ import os
 import re
 import uuid
 import aiohttp
-from config import TEMP_DIR, MAX_FILE_SIZE_MB, SUPADATA_API_KEY
+from config import TEMP_DIR, MAX_FILE_SIZE_MB, SUPADATA_API_KEY, RETRY_MAX_ATTEMPTS, RETRY_BASE_DELAY, SUBPROCESS_TIMEOUT
 
 log = logging.getLogger(__name__)
 
@@ -56,29 +56,44 @@ async def fetch_youtube_transcript(url: str, lang: str = "ru") -> tuple[str, str
         log.warning("SUPADATA_API_KEY not set, skipping YouTube transcript")
         return None
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            params = {"url": url, "text": "true", "lang": lang}
-            headers = {"x-api-key": SUPADATA_API_KEY}
-            async with session.get(
-                "https://api.supadata.ai/v1/transcript",
-                params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=30)
-            ) as resp:
-                if resp.status != 200:
-                    log.warning("Supadata API returned %s for %s", resp.status, video_id)
-                    return None
-                data = await resp.json()
+    last_error = None
+    for attempt in range(1, RETRY_MAX_ATTEMPTS + 1):
+        try:
+            async with aiohttp.ClientSession() as session:
+                params = {"url": url, "text": "true", "lang": lang}
+                headers = {"x-api-key": SUPADATA_API_KEY}
+                async with session.get(
+                    "https://api.supadata.ai/v1/transcript",
+                    params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    if resp.status == 429 or resp.status >= 500:
+                        raise aiohttp.ClientResponseError(resp.request_info, resp.history, status=resp.status, message=f"HTTP {resp.status}")
+                    if resp.status != 200:
+                        log.warning("Supadata API returned %s for %s", resp.status, video_id)
+                        return None
+                    data = await resp.json()
 
-        text = data.get("content", "")
-        if not text or len(text.strip()) < 20:
+            text = data.get("content", "")
+            if not text or len(text.strip()) < 20:
+                return None
+
+            title = await _get_youtube_title(video_id)
+            return text, title
+
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            last_error = e
+            if attempt < RETRY_MAX_ATTEMPTS:
+                delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                log.warning("Supadata attempt %d/%d failed: %s. Retry in %.1fs", attempt, RETRY_MAX_ATTEMPTS, e, delay)
+                await asyncio.sleep(delay)
+            else:
+                log.error("Supadata API failed after %d attempts: %s", RETRY_MAX_ATTEMPTS, last_error)
+                return None
+        except Exception as e:
+            log.exception("Supadata API failed for %s: %s", video_id, e)
             return None
 
-        title = await _get_youtube_title(video_id)
-        return text, title
-
-    except Exception as e:
-        log.exception("Supadata API failed for %s: %s", video_id, e)
-        return None
+    return None
 
 
 async def _get_youtube_title(video_id: str) -> str:
@@ -125,7 +140,12 @@ async def fetch_subtitles(url: str, lang: str = "ru") -> tuple[str, str] | None:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=SUBPROCESS_TIMEOUT)
+    except asyncio.TimeoutError:
+        proc.kill()
+        log.warning("yt-dlp subtitle fetch timed out after %ds for %s", SUBPROCESS_TIMEOUT, url)
+        return None
 
     if proc.returncode != 0:
         return None
@@ -202,7 +222,11 @@ async def download_audio(url: str) -> tuple[str, str]:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=SUBPROCESS_TIMEOUT)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise ValueError(f"Скачивание превысило таймаут ({SUBPROCESS_TIMEOUT} сек)")
 
     if proc.returncode != 0:
         error = stderr.decode().strip()

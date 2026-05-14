@@ -9,9 +9,10 @@ from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart
 from aiogram.enums import ParseMode
 
-from config import BOT_TOKEN, TEMP_DIR, MAX_FILE_SIZE_MB
+from config import BOT_TOKEN, TEMP_DIR, MAX_FILE_SIZE_MB, FFMPEG_TIMEOUT
 from transcriber import transcribe
 from downloader import extract_url, fetch_youtube_transcript, fetch_subtitles, download_audio, cleanup, _extract_youtube_id
+from rate_limit import check_rate_limit, seconds_until_reset
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -42,7 +43,12 @@ async def convert_to_mp3(input_path: str) -> str:
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
-    await proc.wait()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=FFMPEG_TIMEOUT)
+    except asyncio.TimeoutError:
+        proc.kill()
+        cleanup(input_path)
+        raise ValueError(f"Конвертация превысила таймаут ({FFMPEG_TIMEOUT} сек)")
     cleanup(input_path)
     return output_path
 
@@ -93,6 +99,17 @@ async def process_and_reply(message: types.Message, file_path: str, source: str 
         cleanup(file_path)
 
 
+# --- Rate limit check ---
+
+async def rate_limit_guard(message: types.Message) -> bool:
+    """Проверяет rate limit. Возвращает True если можно продолжать."""
+    if check_rate_limit(message.from_user.id):
+        return True
+    wait = seconds_until_reset(message.from_user.id)
+    await message.reply(f"⏸ Слишком много запросов. Подожди {wait} сек.")
+    return False
+
+
 # --- Handlers ---
 
 @dp.message(CommandStart())
@@ -110,6 +127,8 @@ async def cmd_start(message: types.Message):
 
 @dp.message(F.voice)
 async def on_voice(message: types.Message):
+    if not await rate_limit_guard(message):
+        return
     status = await message.reply("⏳ Распознаю голосовое...")
     path = await download_tg_file(message.voice.file_id, "ogg")
     await process_and_reply(message, path, "Голосовое сообщение")
@@ -118,6 +137,8 @@ async def on_voice(message: types.Message):
 
 @dp.message(F.video_note)
 async def on_video_note(message: types.Message):
+    if not await rate_limit_guard(message):
+        return
     status = await message.reply("⏳ Распознаю видеосообщение...")
     path = await download_tg_file(message.video_note.file_id, "mp4")
     await process_and_reply(message, path, "Видеосообщение")
@@ -126,6 +147,8 @@ async def on_video_note(message: types.Message):
 
 @dp.message(F.audio)
 async def on_audio(message: types.Message):
+    if not await rate_limit_guard(message):
+        return
     if message.audio.file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
         await message.reply(f"Файл слишком большой (макс {MAX_FILE_SIZE_MB} МБ).")
         return
@@ -139,6 +162,8 @@ async def on_audio(message: types.Message):
 
 @dp.message(F.video)
 async def on_video(message: types.Message):
+    if not await rate_limit_guard(message):
+        return
     if message.video.file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
         await message.reply(f"Файл слишком большой (макс {MAX_FILE_SIZE_MB} МБ).")
         return
@@ -150,6 +175,8 @@ async def on_video(message: types.Message):
 
 @dp.message(F.document)
 async def on_document(message: types.Message):
+    if not await rate_limit_guard(message):
+        return
     doc = message.document
     name = (doc.file_name or "").lower()
     audio_exts = (".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac", ".wma", ".opus")
@@ -172,6 +199,8 @@ async def on_document(message: types.Message):
 
 @dp.message(F.text)
 async def on_text(message: types.Message):
+    if not await rate_limit_guard(message):
+        return
     url = extract_url(message.text)
     if not url:
         await message.answer(
