@@ -123,7 +123,7 @@ async def fetch_subtitles(url: str, lang: str = "ru") -> tuple[str, str] | None:
     # Сначала получаем инфо о доступных субтитрах
     cmd = [
         "yt-dlp",
-        "--js-runtimes", "node",
+        "--js-runtimes", "deno",
         "--skip-download",
         "--write-subs",
         "--write-auto-subs",
@@ -206,7 +206,7 @@ async def download_audio(url: str) -> tuple[str, str]:
 
     cmd = [
         "yt-dlp",
-        "--js-runtimes", "node",
+        "--js-runtimes", "deno",
         "--extract-audio",
         "--audio-format", "mp3",
         "--audio-quality", "5",

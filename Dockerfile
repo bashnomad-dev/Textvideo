@@ -1,12 +1,11 @@
 FROM python:3.12-slim
 
-ARG CACHE_BUST=20260514v5
+ARG CACHE_BUST=20260514v6
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg curl ca-certificates \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
+    ffmpeg curl ca-certificates unzip \
+    && curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
+    && deno --version \
     && pip install --no-cache-dir yt-dlp \
-    && node --version \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -16,5 +15,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-ENV APP_VERSION=5
+ENV APP_VERSION=6
 CMD ["python", "-u", "bot.py"]
