@@ -61,8 +61,7 @@ async def fetch_youtube_transcript(url: str, lang: str = "ru") -> tuple[str, str
         if not text or len(text.strip()) < 20:
             return None
 
-        # Получаем название через yt-dlp (быстро, без скачивания)
-        title = await _get_video_title(url)
+        title = await _get_youtube_title(video_id)
         return text, title
 
     except Exception as e:
@@ -70,18 +69,16 @@ async def fetch_youtube_transcript(url: str, lang: str = "ru") -> tuple[str, str
         return None
 
 
-async def _get_video_title(url: str) -> str:
-    """Получает название видео через yt-dlp --print title."""
+async def _get_youtube_title(video_id: str) -> str:
+    """Получает название YouTube-видео через oembed API (без ключей и куков)."""
+    import urllib.request
+    import urllib.parse
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "yt-dlp", "--js-runtimes", "node",
-            "--skip-download", "--no-playlist", "--print", "title", url,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        stdout, _ = await proc.communicate()
-        title = stdout.decode().strip().split("\n")[0]
-        return title or "Без названия"
+        oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
+        req = urllib.request.Request(oembed_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode())
+            return data.get("title", "Без названия")
     except Exception:
         return "Без названия"
 
