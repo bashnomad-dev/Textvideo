@@ -1,11 +1,14 @@
-"""Модуль скачивания аудио и субтитров из ссылок через yt-dlp."""
+"""Модуль скачивания аудио и субтитров из ссылок через yt-dlp и youtube-transcript-api."""
 
 import asyncio
 import json
+import logging
 import os
 import re
 import uuid
 from config import TEMP_DIR, MAX_FILE_SIZE_MB
+
+log = logging.getLogger(__name__)
 
 # Паттерн для определения ссылок
 URL_PATTERN = re.compile(
@@ -21,10 +24,66 @@ URL_PATTERN = re.compile(
 )
 
 
+YOUTUBE_ID_PATTERN = re.compile(
+    r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)([a-zA-Z0-9_-]{11})'
+)
+
+
 def extract_url(text: str) -> str | None:
     """Извлекает первую ссылку из текста."""
     match = URL_PATTERN.search(text)
     return match.group(0) if match else None
+
+
+def _extract_youtube_id(url: str) -> str | None:
+    """Извлекает YouTube video ID из URL."""
+    match = YOUTUBE_ID_PATTERN.search(url)
+    return match.group(1) if match else None
+
+
+async def fetch_youtube_transcript(url: str, lang: str = "ru") -> tuple[str, str] | None:
+    """Получает транскрипт YouTube-видео через youtube-transcript-api.
+
+    Returns:
+        (текст, название видео) или None
+    """
+    video_id = _extract_youtube_id(url)
+    if not video_id:
+        return None
+
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+
+        ytt_api = YouTubeTranscriptApi()
+        transcript = ytt_api.fetch(video_id, languages=[lang, "en"])
+        text = " ".join(s.text for s in transcript.snippets)
+
+        if not text or len(text.strip()) < 20:
+            return None
+
+        # Получаем название через yt-dlp (быстро, без скачивания)
+        title = await _get_video_title(url)
+        return text, title
+
+    except Exception as e:
+        log.warning("youtube-transcript-api failed for %s: %s", video_id, e)
+        return None
+
+
+async def _get_video_title(url: str) -> str:
+    """Получает название видео через yt-dlp --print title."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "yt-dlp", "--js-runtimes", "node",
+            "--skip-download", "--no-playlist", "--print", "title", url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+        title = stdout.decode().strip().split("\n")[0]
+        return title or "Без названия"
+    except Exception:
+        return "Без названия"
 
 
 async def fetch_subtitles(url: str, lang: str = "ru") -> tuple[str, str] | None:
@@ -40,6 +99,7 @@ async def fetch_subtitles(url: str, lang: str = "ru") -> tuple[str, str] | None:
     # Сначала получаем инфо о доступных субтитрах
     cmd = [
         "yt-dlp",
+        "--js-runtimes", "node",
         "--skip-download",
         "--write-subs",
         "--write-auto-subs",
@@ -117,6 +177,7 @@ async def download_audio(url: str) -> tuple[str, str]:
 
     cmd = [
         "yt-dlp",
+        "--js-runtimes", "node",
         "--extract-audio",
         "--audio-format", "mp3",
         "--audio-quality", "5",
