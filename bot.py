@@ -11,7 +11,7 @@ from aiogram.enums import ParseMode
 
 from config import BOT_TOKEN, TEMP_DIR, MAX_FILE_SIZE_MB
 from transcriber import transcribe
-from downloader import extract_url, fetch_youtube_transcript, fetch_subtitles, download_audio, cleanup
+from downloader import extract_url, fetch_youtube_transcript, fetch_subtitles, download_audio, cleanup, _extract_youtube_id
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -179,15 +179,30 @@ async def on_text(message: types.Message):
         )
         return
 
+    is_youtube = _extract_youtube_id(url) is not None
     status = await message.reply("⏳ Ищу субтитры...")
     try:
-        # Шаг 1: YouTube — пробуем youtube-transcript-api (без куков, быстро)
-        result = await fetch_youtube_transcript(url)
+        if is_youtube:
+            # YouTube — только через youtube-transcript-api (yt-dlp заблокирован)
+            result = await fetch_youtube_transcript(url)
+            if result:
+                text, title = result
+                header = f"📝 <b>{title}</b>\n\n"
+                parts = split_text(header + text)
+                for i, part in enumerate(parts):
+                    if i == 0:
+                        await message.reply(part, parse_mode=ParseMode.HTML)
+                    else:
+                        await message.answer(part)
+                await status.delete()
+                return
+            else:
+                await message.reply("Не удалось получить субтитры для этого видео. Возможно, у него нет субтитров.")
+                await status.delete()
+                return
 
-        # Шаг 2: fallback — yt-dlp субтитры (для не-YouTube)
-        if not result:
-            result = await fetch_subtitles(url)
-
+        # Не-YouTube: пробуем yt-dlp субтитры, потом скачивание аудио
+        result = await fetch_subtitles(url)
         if result:
             text, title = result
             header = f"📝 <b>{title}</b>\n\n"
@@ -200,7 +215,7 @@ async def on_text(message: types.Message):
             await status.delete()
             return
 
-        # Шаг 3: субтитров нет — скачиваем аудио и транскрибируем
+        # Субтитров нет — скачиваем аудио и транскрибируем
         await status.edit_text("⏳ Субтитров нет, скачиваю аудио...")
         audio_path, title = await download_audio(url)
         await process_and_reply(message, audio_path, title)

@@ -65,7 +65,7 @@ async def fetch_youtube_transcript(url: str, lang: str = "ru") -> tuple[str, str
         return text, title
 
     except Exception as e:
-        log.warning("youtube-transcript-api failed for %s: %s", video_id, e)
+        log.exception("youtube-transcript-api failed for %s: %s", video_id, e)
         return None
 
 
