@@ -232,7 +232,8 @@ async def on_text(message: types.Message):
 
 
 async def main():
-    log.info("Бот запущен")
+    version = os.getenv("APP_VERSION", "unknown")
+    log.info("Бот запущен (v%s)", version)
     os.makedirs(TEMP_DIR, exist_ok=True)
     await dp.start_polling(bot)
 
