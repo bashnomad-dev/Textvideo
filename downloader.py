@@ -6,7 +6,8 @@ import logging
 import os
 import re
 import uuid
-from config import TEMP_DIR, MAX_FILE_SIZE_MB
+import aiohttp
+from config import TEMP_DIR, MAX_FILE_SIZE_MB, SUPADATA_API_KEY
 
 log = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ def _extract_youtube_id(url: str) -> str | None:
 
 
 async def fetch_youtube_transcript(url: str, lang: str = "ru") -> tuple[str, str] | None:
-    """Получает транскрипт YouTube-видео через youtube-transcript-api.
+    """Получает транскрипт YouTube-видео через Supadata API.
 
     Returns:
         (текст, название видео) или None
@@ -51,13 +52,24 @@ async def fetch_youtube_transcript(url: str, lang: str = "ru") -> tuple[str, str
     if not video_id:
         return None
 
+    if not SUPADATA_API_KEY:
+        log.warning("SUPADATA_API_KEY not set, skipping YouTube transcript")
+        return None
+
     try:
-        from youtube_transcript_api import YouTubeTranscriptApi
+        async with aiohttp.ClientSession() as session:
+            params = {"url": url, "text": "true", "lang": lang}
+            headers = {"x-api-key": SUPADATA_API_KEY}
+            async with session.get(
+                "https://api.supadata.ai/v1/transcript",
+                params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=30)
+            ) as resp:
+                if resp.status != 200:
+                    log.warning("Supadata API returned %s for %s", resp.status, video_id)
+                    return None
+                data = await resp.json()
 
-        ytt_api = YouTubeTranscriptApi()
-        transcript = ytt_api.fetch(video_id, languages=[lang, "en"])
-        text = " ".join(s.text for s in transcript.snippets)
-
+        text = data.get("content", "")
         if not text or len(text.strip()) < 20:
             return None
 
@@ -65,22 +77,22 @@ async def fetch_youtube_transcript(url: str, lang: str = "ru") -> tuple[str, str
         return text, title
 
     except Exception as e:
-        log.exception("youtube-transcript-api failed for %s: %s", video_id, e)
+        log.exception("Supadata API failed for %s: %s", video_id, e)
         return None
 
 
 async def _get_youtube_title(video_id: str) -> str:
-    """Получает название YouTube-видео через oembed API (без ключей и куков)."""
-    import urllib.request
-    import urllib.parse
+    """Получает название YouTube-видео через oembed API."""
     try:
-        oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
-        req = urllib.request.Request(oembed_url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode())
-            return data.get("title", "Без названия")
+        async with aiohttp.ClientSession() as session:
+            oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
+            async with session.get(oembed_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("title", "Без названия")
     except Exception:
-        return "Без названия"
+        pass
+    return "Без названия"
 
 
 async def fetch_subtitles(url: str, lang: str = "ru") -> tuple[str, str] | None:
