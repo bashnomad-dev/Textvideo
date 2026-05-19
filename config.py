@@ -11,6 +11,10 @@ SUPADATA_API_KEY = os.getenv("SUPADATA_API_KEY", "")
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "25"))
 TEMP_DIR = "/tmp/textvideo"
 
+# Саммаризация через OpenAI. Если OPENAI_API_KEY не задан — бот шлёт только транскрипт.
+SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", "gpt-4o")
+SUMMARY_MIN_CHARS = int(os.getenv("SUMMARY_MIN_CHARS", "400"))
+
 # Rate limiting: макс запросов на юзера в минуту
 RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "10"))
 

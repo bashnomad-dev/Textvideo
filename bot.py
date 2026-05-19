@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import re
 import sys
 
 from aiogram import Bot, Dispatcher, F, types
@@ -11,6 +12,7 @@ from aiogram.enums import ParseMode
 
 from config import BOT_TOKEN, TEMP_DIR, MAX_FILE_SIZE_MB, FFMPEG_TIMEOUT
 from transcriber import transcribe
+from summarizer import summarize
 from downloader import extract_url, fetch_youtube_transcript, fetch_subtitles, download_audio, cleanup, _extract_youtube_id
 from rate_limit import check_rate_limit, seconds_until_reset
 
@@ -73,6 +75,30 @@ def split_text(text: str, max_len: int = 4000) -> list[str]:
     return parts
 
 
+def _safe_filename(s: str) -> str:
+    """Готовит имя файла из заголовка."""
+    cleaned = re.sub(r"[^\w\s\-]+", "", s or "", flags=re.UNICODE).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned[:80] or "transcript"
+
+
+async def send_result(message: types.Message, transcript: str, title: str = ""):
+    """Отправляет саммари (если доступно) в чат + полный транскрипт файлом .txt."""
+    summary = await summarize(transcript, title)
+
+    head = f"📝 <b>{title}</b>\n\n" if title else ""
+    body = summary if summary else transcript
+    for i, part in enumerate(split_text(head + body)):
+        if i == 0:
+            await message.reply(part, parse_mode=ParseMode.HTML)
+        else:
+            await message.answer(part)
+
+    # Полный транскрипт — всегда отдельным файлом
+    doc = types.BufferedInputFile(transcript.encode("utf-8"), filename=f"{_safe_filename(title)}.txt")
+    await message.answer_document(doc, caption="Полный транскрипт")
+
+
 async def process_and_reply(message: types.Message, file_path: str, source: str = ""):
     """Транскрибирует файл и отправляет результат."""
     try:
@@ -84,13 +110,7 @@ async def process_and_reply(message: types.Message, file_path: str, source: str 
             await message.reply("Не удалось распознать речь в этом файле.")
             return
 
-        header = f"📝 <b>{source}</b>\n\n" if source else ""
-        parts = split_text(header + text)
-        for i, part in enumerate(parts):
-            if i == 0:
-                await message.reply(part, parse_mode=ParseMode.HTML)
-            else:
-                await message.answer(part)
+        await send_result(message, text, source)
 
     except Exception as e:
         log.exception("Ошибка транскрибации")
@@ -120,7 +140,7 @@ async def cmd_start(message: types.Message):
         "🎵 <b>Аудиофайл</b> (mp3, wav, ogg...)\n"
         "🎬 <b>Видеофайл</b>\n"
         "🔗 <b>Ссылку</b> (YouTube, Instagram, TikTok...)\n\n"
-        "Я переведу всё в текст.",
+        "Пришлю структурированное саммари и полный транскрипт файлом .txt.",
         parse_mode=ParseMode.HTML,
     )
 
@@ -216,13 +236,7 @@ async def on_text(message: types.Message):
             result = await fetch_youtube_transcript(url)
             if result:
                 text, title = result
-                header = f"📝 <b>{title}</b>\n\n"
-                parts = split_text(header + text)
-                for i, part in enumerate(parts):
-                    if i == 0:
-                        await message.reply(part, parse_mode=ParseMode.HTML)
-                    else:
-                        await message.answer(part)
+                await send_result(message, text, title)
                 await status.delete()
                 return
             else:
@@ -234,13 +248,7 @@ async def on_text(message: types.Message):
         result = await fetch_subtitles(url)
         if result:
             text, title = result
-            header = f"📝 <b>{title}</b>\n\n"
-            parts = split_text(header + text)
-            for i, part in enumerate(parts):
-                if i == 0:
-                    await message.reply(part, parse_mode=ParseMode.HTML)
-                else:
-                    await message.answer(part)
+            await send_result(message, text, title)
             await status.delete()
             return
 
