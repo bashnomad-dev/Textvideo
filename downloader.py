@@ -210,7 +210,6 @@ async def download_audio(url: str) -> tuple[str, str]:
         "--extract-audio",
         "--audio-format", "mp3",
         "--audio-quality", "5",
-        "--max-filesize", f"{MAX_FILE_SIZE_MB}m",
         "--no-playlist",
         "--print", "title",
         "-o", output_path,
@@ -228,9 +227,10 @@ async def download_audio(url: str) -> tuple[str, str]:
         proc.kill()
         raise ValueError(f"Скачивание превысило таймаут ({SUBPROCESS_TIMEOUT} сек)")
 
+    stderr_text = stderr.decode().strip()
+
     if proc.returncode != 0:
-        error = stderr.decode().strip()
-        raise ValueError(f"Не удалось скачать: {error[:200]}")
+        raise ValueError(f"Не удалось скачать: {stderr_text[:400] or 'неизвестная ошибка yt-dlp'}")
 
     title = stdout.decode().strip().split("\n")[0] or "Без названия"
 
@@ -242,12 +242,13 @@ async def download_audio(url: str) -> tuple[str, str]:
                 actual_path = os.path.join(TEMP_DIR, f)
                 break
         else:
-            raise ValueError("Файл не найден после скачивания")
+            hint = stderr_text[-400:] if stderr_text else "yt-dlp не записал файл и ничего не сказал в stderr"
+            raise ValueError(f"Файл не появился после скачивания. yt-dlp: {hint}")
 
     size_mb = os.path.getsize(actual_path) / (1024 * 1024)
     if size_mb > MAX_FILE_SIZE_MB:
         os.remove(actual_path)
-        raise ValueError(f"Файл слишком большой: {size_mb:.1f} МБ (макс {MAX_FILE_SIZE_MB} МБ)")
+        raise ValueError(f"Аудиодорожка слишком большая: {size_mb:.1f} МБ (макс {MAX_FILE_SIZE_MB} МБ)")
 
     return actual_path, title
 
