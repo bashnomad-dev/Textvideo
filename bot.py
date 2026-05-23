@@ -14,6 +14,7 @@ from config import BOT_TOKEN, TEMP_DIR, MAX_FILE_SIZE_MB, FFMPEG_TIMEOUT
 from transcriber import transcribe
 from summarizer import summarize
 from downloader import extract_url, fetch_youtube_transcript, fetch_subtitles, download_audio, cleanup, _extract_youtube_id
+from cloud_downloader import detect_cloud_kind, download_cloud_file
 from rate_limit import check_rate_limit, seconds_until_reset
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -139,7 +140,10 @@ async def cmd_start(message: types.Message):
         "🎤 <b>Голосовое</b> или <b>видеосообщение</b>\n"
         "🎵 <b>Аудиофайл</b> (mp3, wav, ogg...)\n"
         "🎬 <b>Видеофайл</b>\n"
-        "🔗 <b>Ссылку</b> (YouTube, Instagram, TikTok...)\n\n"
+        "🔗 <b>Ссылку</b>:\n"
+        "   • YouTube, Instagram, TikTok, VK, X…\n"
+        "   • Google Drive, Яндекс.Диск, Dropbox\n"
+        "   • Прямую ссылку на mp3/mp4/wav и т.п.\n\n"
         "Пришлю структурированное саммари и полный транскрипт файлом .txt.",
         parse_mode=ParseMode.HTML,
     )
@@ -229,8 +233,21 @@ async def on_text(message: types.Message):
         return
 
     is_youtube = _extract_youtube_id(url) is not None
+    cloud_kind = None if is_youtube else detect_cloud_kind(url)
     status = await message.reply("⏳ Ищу субтитры...")
     try:
+        if cloud_kind:
+            label = {
+                "gdrive": "Google Drive",
+                "yadisk": "Яндекс.Диск",
+                "dropbox": "Dropbox",
+                "direct": "прямая ссылка",
+            }.get(cloud_kind, "облако")
+            await status.edit_text(f"⏳ Скачиваю файл ({label})...")
+            file_path, title = await download_cloud_file(url, cloud_kind)
+            await process_and_reply(message, file_path, title)
+            return
+
         if is_youtube:
             # YouTube — только через youtube-transcript-api (yt-dlp заблокирован)
             result = await fetch_youtube_transcript(url)
