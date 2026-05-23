@@ -1,9 +1,13 @@
-"""Скачивание аудио/видео из облачных хранилищ и по прямым ссылкам.
+"""Извлечение аудио из ссылок на облачные хранилища и прямых URL.
+
+Источник стримится ffmpeg-ом прямо из HTTP в mp3 — большой видеофайл
+не приземляется на диск целиком (1.5 ГБ MOV → ~30 МБ mp3).
 
 Поддерживаются: Google Drive, Яндекс.Диск (disk.yandex / yadi.sk), Dropbox,
 прямые ссылки на медиа-файлы.
 """
 
+import asyncio
 import logging
 import os
 import re
@@ -24,12 +28,14 @@ MEDIA_EXTS = (
 GDRIVE_ID = re.compile(r"(?:/file/d/|[?&]id=)([a-zA-Z0-9_-]{20,})")
 YADISK_HOSTS = ("disk.yandex.", "yadi.sk")
 
-# Лимит размера исходного файла, чтобы не залить /tmp. Аудио потом всё равно ужмётся ffmpeg.
-MAX_DOWNLOAD_MB = int(os.getenv("MAX_DOWNLOAD_MB", "500"))
+# Жёсткий потолок на исходник — выше шёл бы транскрибат на десятки часов.
+MAX_SOURCE_GB = float(os.getenv("MAX_SOURCE_GB", "5"))
+# Таймаут на streaming-конвертацию (сек). 1.5 ГБ MOV → mp3 укладывается ~5-10 минут.
+EXTRACT_TIMEOUT = int(os.getenv("EXTRACT_TIMEOUT", "1800"))
 
 
 def detect_cloud_kind(url: str) -> str | None:
-    """Определяет тип источника. Возвращает 'gdrive' | 'yadisk' | 'dropbox' | 'direct' | None."""
+    """'gdrive' | 'yadisk' | 'dropbox' | 'direct' | None."""
     parsed = urlparse(url)
     host = parsed.netloc.lower()
 
@@ -40,165 +46,123 @@ def detect_cloud_kind(url: str) -> str | None:
     if "dropbox.com" in host:
         return "dropbox"
 
-    path = parsed.path.lower()
-    if any(path.endswith(e) for e in MEDIA_EXTS):
+    if any(parsed.path.lower().endswith(e) for e in MEDIA_EXTS):
         return "direct"
     return None
 
 
-def _filename_from_disposition(header: str) -> str | None:
-    if not header:
-        return None
-    m = re.search(r"filename\*=UTF-8''([^;]+)", header, flags=re.IGNORECASE)
-    if m:
-        return unquote(m.group(1).strip().strip('"'))
-    m = re.search(r'filename="?([^";]+)"?', header, flags=re.IGNORECASE)
-    if m:
-        return m.group(1).strip()
-    return None
-
-
-def _rename_with_ext(path: str, name: str) -> str:
-    """Если у скачанного файла нет расширения, добавляем его из имени источника."""
-    ext = os.path.splitext(name)[1].lower()
-    if not ext:
-        return path
-    new_path = os.path.splitext(path)[0] + ext
-    if new_path == path:
-        return path
-    os.rename(path, new_path)
-    return new_path
-
-
-async def _stream(session: aiohttp.ClientSession, url: str, dest: str) -> tuple[str | None, str]:
-    """Качает файл в dest. Возвращает (suggested_filename, content_type)."""
-    timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=120)
-    async with session.get(url, allow_redirects=True, timeout=timeout) as resp:
-        if resp.status != 200:
-            raise ValueError(f"HTTP {resp.status} при скачивании файла")
-
-        ctype = (resp.headers.get("Content-Type") or "").lower()
-        if "text/html" in ctype:
-            raise ValueError(
-                "Сервер вернул HTML вместо файла. Возможно, ссылка не публичная "
-                "или требует подтверждения скачивания."
-            )
-
-        clen = resp.headers.get("Content-Length")
-        if clen and int(clen) > MAX_DOWNLOAD_MB * 1024 * 1024:
-            raise ValueError(
-                f"Файл слишком большой: {int(clen) / 1024 / 1024:.1f} МБ "
-                f"(макс {MAX_DOWNLOAD_MB} МБ)"
-            )
-
-        suggested = _filename_from_disposition(resp.headers.get("Content-Disposition", ""))
-
-        max_bytes = MAX_DOWNLOAD_MB * 1024 * 1024
-        written = 0
-        with open(dest, "wb") as f:
-            async for chunk in resp.content.iter_chunked(1 << 16):
-                written += len(chunk)
-                if written > max_bytes:
-                    f.close()
-                    os.remove(dest)
-                    raise ValueError(
-                        f"Файл превысил {MAX_DOWNLOAD_MB} МБ во время скачивания"
-                    )
-                f.write(chunk)
-
-        return suggested, ctype
-
-
-async def _download_gdrive(url: str) -> tuple[str, str]:
-    m = GDRIVE_ID.search(url)
-    if not m:
-        raise ValueError("Не удалось извлечь ID файла Google Drive из ссылки")
-    file_id = m.group(1)
-    direct = (
-        f"https://drive.usercontent.google.com/download"
-        f"?id={file_id}&export=download&confirm=t"
-    )
-
-    dest = os.path.join(TEMP_DIR, f"{uuid.uuid4().hex[:8]}.bin")
-    async with aiohttp.ClientSession() as session:
-        suggested, _ = await _stream(session, direct, dest)
-
-    name = suggested or f"gdrive_{file_id}"
-    title = os.path.splitext(name)[0] or "Файл Google Drive"
-    return _rename_with_ext(dest, name), title
-
-
-async def _download_yadisk(url: str) -> tuple[str, str]:
+async def _resolve_yadisk(url: str) -> tuple[str, str, int | None]:
     api = "https://cloud-api.yandex.net/v1/disk/public/resources"
+    timeout = aiohttp.ClientTimeout(total=20)
+    name = "Yandex Disk"
+    size: int | None = None
+
     async with aiohttp.ClientSession() as session:
-        # Имя файла
-        name = "Yandex Disk"
-        async with session.get(
-            api,
-            params={"public_key": url},
-            timeout=aiohttp.ClientTimeout(total=20),
-        ) as r:
+        async with session.get(api, params={"public_key": url}, timeout=timeout) as r:
             if r.status == 200:
                 meta = await r.json()
                 name = meta.get("name") or name
+                size = meta.get("size")
+            else:
+                raise ValueError(f"Яндекс.Диск API HTTP {r.status} на метаданных")
 
-        # Прямая ссылка
-        async with session.get(
-            api + "/download",
-            params={"public_key": url},
-            timeout=aiohttp.ClientTimeout(total=20),
-        ) as r:
+        async with session.get(api + "/download", params={"public_key": url}, timeout=timeout) as r:
             if r.status != 200:
-                raise ValueError(f"Яндекс.Диск API вернул HTTP {r.status}")
+                raise ValueError(f"Яндекс.Диск API HTTP {r.status} на download")
             data = await r.json()
 
-        href = data.get("href")
-        if not href:
-            raise ValueError("Яндекс.Диск не вернул прямую ссылку на скачивание")
-
-        dest = os.path.join(TEMP_DIR, f"{uuid.uuid4().hex[:8]}.bin")
-        suggested, _ = await _stream(session, href, dest)
-
-    final_name = suggested or name
-    title = os.path.splitext(final_name)[0] or final_name
-    return _rename_with_ext(dest, final_name), title
+    href = data.get("href")
+    if not href:
+        raise ValueError("Яндекс.Диск не вернул прямую ссылку")
+    return href, name, size
 
 
-async def _download_dropbox(url: str) -> tuple[str, str]:
-    direct = re.sub(r"([?&])dl=0", r"\1dl=1", url)
+async def _resolve_gdrive(url: str) -> tuple[str, str, int | None]:
+    m = GDRIVE_ID.search(url)
+    if not m:
+        raise ValueError("Не удалось извлечь ID файла Google Drive из ссылки")
+    fid = m.group(1)
+    direct = (
+        f"https://drive.usercontent.google.com/download"
+        f"?id={fid}&export=download&confirm=t"
+    )
+    return direct, f"gdrive_{fid}", None
+
+
+async def _resolve_dropbox(url: str) -> tuple[str, str, int | None]:
+    direct = re.sub(r"([?&])dl=0(\b|$)", r"\1dl=1", url)
     if "dl=" not in direct:
         sep = "&" if "?" in direct else "?"
         direct = f"{direct}{sep}dl=1"
-
-    dest = os.path.join(TEMP_DIR, f"{uuid.uuid4().hex[:8]}.bin")
-    async with aiohttp.ClientSession() as session:
-        suggested, _ = await _stream(session, direct, dest)
-
-    name = suggested or os.path.basename(urlparse(url).path) or "Dropbox"
-    title = os.path.splitext(name)[0] or name
-    return _rename_with_ext(dest, name), title
+    name = os.path.basename(urlparse(url).path) or "Dropbox"
+    return direct, unquote(name), None
 
 
-async def _download_direct(url: str) -> tuple[str, str]:
-    dest = os.path.join(TEMP_DIR, f"{uuid.uuid4().hex[:8]}.bin")
-    async with aiohttp.ClientSession() as session:
-        suggested, _ = await _stream(session, url, dest)
-
-    name = suggested or os.path.basename(urlparse(url).path) or "Файл"
-    name = unquote(name)
-    title = os.path.splitext(name)[0] or name
-    return _rename_with_ext(dest, name), title
+async def _resolve_direct(url: str) -> tuple[str, str, int | None]:
+    name = os.path.basename(urlparse(url).path) or "Файл"
+    return url, unquote(name), None
 
 
-async def download_cloud_file(url: str, kind: str) -> tuple[str, str]:
-    """Скачивает файл по облачной/прямой ссылке. Возвращает (путь, название)."""
-    os.makedirs(TEMP_DIR, exist_ok=True)
-    if kind == "gdrive":
-        return await _download_gdrive(url)
+async def _resolve(url: str, kind: str) -> tuple[str, str, int | None]:
     if kind == "yadisk":
-        return await _download_yadisk(url)
+        return await _resolve_yadisk(url)
+    if kind == "gdrive":
+        return await _resolve_gdrive(url)
     if kind == "dropbox":
-        return await _download_dropbox(url)
+        return await _resolve_dropbox(url)
     if kind == "direct":
-        return await _download_direct(url)
+        return await _resolve_direct(url)
     raise ValueError(f"Неизвестный тип источника: {kind}")
+
+
+async def extract_audio_from_url(url: str, kind: str) -> tuple[str, str, int | None]:
+    """Стримит источник в ffmpeg, возвращает (mp3_path, title, size_bytes_or_None)."""
+    direct, name, size = await _resolve(url, kind)
+
+    if size and size > MAX_SOURCE_GB * 1024**3:
+        raise ValueError(
+            f"Файл слишком большой: {size / 1024**3:.1f} ГБ "
+            f"(макс {MAX_SOURCE_GB:g} ГБ)"
+        )
+
+    os.makedirs(TEMP_DIR, exist_ok=True)
+    mp3_path = os.path.join(TEMP_DIR, f"{uuid.uuid4().hex[:8]}.mp3")
+
+    cmd = [
+        "ffmpeg",
+        "-hide_banner", "-loglevel", "error",
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "10",
+        "-i", direct,
+        "-vn",
+        "-acodec", "libmp3lame",
+        "-q:a", "5",
+        "-y", mp3_path,
+    ]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=EXTRACT_TIMEOUT)
+    except asyncio.TimeoutError:
+        proc.kill()
+        if os.path.exists(mp3_path):
+            os.remove(mp3_path)
+        raise ValueError(f"Извлечение аудио превысило таймаут ({EXTRACT_TIMEOUT} сек)")
+
+    if proc.returncode != 0:
+        err = stderr.decode(errors="replace").strip()
+        if os.path.exists(mp3_path):
+            os.remove(mp3_path)
+        hint = err.splitlines()[-1] if err else "ffmpeg вернул ошибку без сообщения"
+        raise ValueError(f"ffmpeg не смог обработать источник: {hint[:300]}")
+
+    if not os.path.exists(mp3_path) or os.path.getsize(mp3_path) == 0:
+        raise ValueError("Аудио не извлечено (пустой файл)")
+
+    title = os.path.splitext(name)[0] or name
+    return mp3_path, title, size

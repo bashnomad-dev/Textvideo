@@ -14,7 +14,7 @@ from config import BOT_TOKEN, TEMP_DIR, MAX_FILE_SIZE_MB, FFMPEG_TIMEOUT
 from transcriber import transcribe
 from summarizer import summarize
 from downloader import extract_url, fetch_youtube_transcript, fetch_subtitles, download_audio, cleanup, _extract_youtube_id
-from cloud_downloader import detect_cloud_kind, download_cloud_file
+from cloud_downloader import detect_cloud_kind, extract_audio_from_url
 from rate_limit import check_rate_limit, seconds_until_reset
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -243,9 +243,16 @@ async def on_text(message: types.Message):
                 "dropbox": "Dropbox",
                 "direct": "прямая ссылка",
             }.get(cloud_kind, "облако")
-            await status.edit_text(f"⏳ Скачиваю файл ({label})...")
-            file_path, title = await download_cloud_file(url, cloud_kind)
-            await process_and_reply(message, file_path, title)
+            await status.edit_text(f"⏳ Извлекаю аудио ({label})...")
+            mp3_path, title, _ = await extract_audio_from_url(url, cloud_kind)
+            try:
+                text = await transcribe(mp3_path)
+            finally:
+                cleanup(mp3_path)
+            if not text:
+                await message.reply("Не удалось распознать речь в этом файле.")
+                return
+            await send_result(message, text, title)
             return
 
         if is_youtube:
