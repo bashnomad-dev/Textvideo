@@ -8,7 +8,8 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 TRANSCRIBE_PROVIDER = os.getenv("TRANSCRIBE_PROVIDER", "groq")  # groq | openai
 SUPADATA_API_KEY = os.getenv("SUPADATA_API_KEY", "")
-MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "25"))
+# Потолок прямого скачивания через Bot API — у Telegram это 20 МБ.
+MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "20"))
 TEMP_DIR = "/tmp/textvideo"
 
 # Саммаризация через OpenAI. Если OPENAI_API_KEY не задан — бот шлёт только транскрипт.

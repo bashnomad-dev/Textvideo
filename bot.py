@@ -23,6 +23,12 @@ log = logging.getLogger(__name__)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+TOO_BIG_MSG = (
+    f"📦 Файл больше {MAX_FILE_SIZE_MB} МБ — Telegram не даёт ботам скачивать такие напрямую.\n\n"
+    "Залей его на Google Drive, Яндекс.Диск или Dropbox (или дай прямую ссылку на файл) "
+    "и пришли ссылку сюда — размер не ограничен, я сам вытащу аудио."
+)
+
 
 # --- Helpers ---
 
@@ -174,7 +180,7 @@ async def on_audio(message: types.Message):
     if not await rate_limit_guard(message):
         return
     if message.audio.file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
-        await message.reply(f"Файл слишком большой (макс {MAX_FILE_SIZE_MB} МБ).")
+        await message.reply(TOO_BIG_MSG)
         return
     status = await message.reply("⏳ Распознаю аудио...")
     ext = (message.audio.file_name or "audio.mp3").rsplit(".", 1)[-1]
@@ -189,7 +195,7 @@ async def on_video(message: types.Message):
     if not await rate_limit_guard(message):
         return
     if message.video.file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
-        await message.reply(f"Файл слишком большой (макс {MAX_FILE_SIZE_MB} МБ).")
+        await message.reply(TOO_BIG_MSG)
         return
     status = await message.reply("⏳ Распознаю видео...")
     path = await download_tg_file(message.video.file_id, "mp4")
@@ -211,7 +217,7 @@ async def on_document(message: types.Message):
         return
 
     if doc.file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
-        await message.reply(f"Файл слишком большой (макс {MAX_FILE_SIZE_MB} МБ).")
+        await message.reply(TOO_BIG_MSG)
         return
 
     status = await message.reply("⏳ Распознаю файл...")

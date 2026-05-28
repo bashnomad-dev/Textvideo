@@ -1,7 +1,8 @@
 """Извлечение аудио из ссылок на облачные хранилища и прямых URL.
 
-Источник стримится ffmpeg-ом прямо из HTTP в mp3 — большой видеофайл
-не приземляется на диск целиком (1.5 ГБ MOV → ~30 МБ mp3).
+Источник качается на диск через aria2c в несколько потоков (на порядок быстрее
+одиночного HTTP-стрима и без двойного чтения MOV без faststart), затем локальный
+ffmpeg вытаскивает дорожку в mono/16k mp3 (1.5 ГБ MOV → единицы МБ mp3).
 
 Поддерживаются: Google Drive, Яндекс.Диск (disk.yandex / yadi.sk), Dropbox,
 прямые ссылки на медиа-файлы.
@@ -30,8 +31,13 @@ YADISK_HOSTS = ("disk.yandex.", "yadi.sk")
 
 # Жёсткий потолок на исходник — выше шёл бы транскрибат на десятки часов.
 MAX_SOURCE_GB = float(os.getenv("MAX_SOURCE_GB", "5"))
-# Таймаут на streaming-конвертацию (сек). 1.5 ГБ MOV → mp3 укладывается ~5-10 минут.
+# Таймаут на локальную ffmpeg-конвертацию уже скачанного файла (сек).
 EXTRACT_TIMEOUT = int(os.getenv("EXTRACT_TIMEOUT", "1800"))
+# Параллельная загрузка через aria2c.
+ARIA_CONNECTIONS = int(os.getenv("ARIA_CONNECTIONS", "16"))
+DOWNLOAD_TIMEOUT = int(os.getenv("DOWNLOAD_TIMEOUT", "1200"))
+# Подсказка ffmpeg по контейнеру: расширение исходника, если оно есть в имени.
+_EXT_RE = re.compile(r"\.([a-z0-9]{2,4})$", re.IGNORECASE)
 
 
 def detect_cloud_kind(url: str) -> str | None:
@@ -115,32 +121,59 @@ async def _resolve(url: str, kind: str) -> tuple[str, str, int | None]:
     raise ValueError(f"Неизвестный тип источника: {kind}")
 
 
-async def extract_audio_from_url(url: str, kind: str) -> tuple[str, str, int | None]:
-    """Стримит источник в ffmpeg, возвращает (mp3_path, title, size_bytes_or_None)."""
-    direct, name, size = await _resolve(url, kind)
+async def _download(direct: str, dest: str) -> None:
+    """Качает файл в несколько потоков через aria2c."""
+    cmd = [
+        "aria2c",
+        "-x", str(ARIA_CONNECTIONS),
+        "-s", str(ARIA_CONNECTIONS),
+        "-k", "1M",
+        "--max-tries=3", "--retry-wait=5",
+        "--console-log-level=warn", "--summary-interval=0",
+        "--allow-overwrite=true", "--auto-file-renaming=false",
+        "-d", os.path.dirname(dest), "-o", os.path.basename(dest),
+        direct,
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=DOWNLOAD_TIMEOUT)
+    except asyncio.TimeoutError:
+        proc.kill()
+        if os.path.exists(dest):
+            os.remove(dest)
+        raise ValueError(f"Скачивание превысило таймаут ({DOWNLOAD_TIMEOUT} сек)")
 
-    if size and size > MAX_SOURCE_GB * 1024**3:
+    if proc.returncode != 0:
+        err = stderr.decode(errors="replace").strip()
+        if os.path.exists(dest):
+            os.remove(dest)
+        hint = err.splitlines()[-1] if err else "aria2c вернул ошибку без сообщения"
+        raise ValueError(f"Не удалось скачать файл: {hint[:300]}")
+
+    if not os.path.exists(dest) or os.path.getsize(dest) == 0:
+        raise ValueError("Скачанный файл пуст")
+
+    got = os.path.getsize(dest)
+    if got > MAX_SOURCE_GB * 1024**3:
+        os.remove(dest)
         raise ValueError(
-            f"Файл слишком большой: {size / 1024**3:.1f} ГБ "
-            f"(макс {MAX_SOURCE_GB:g} ГБ)"
+            f"Файл слишком большой: {got / 1024**3:.1f} ГБ (макс {MAX_SOURCE_GB:g} ГБ)"
         )
 
-    os.makedirs(TEMP_DIR, exist_ok=True)
-    mp3_path = os.path.join(TEMP_DIR, f"{uuid.uuid4().hex[:8]}.mp3")
 
+async def _to_mp3(src: str, mp3_path: str) -> None:
+    """Вытаскивает аудиодорожку из локального файла в mono/16k mp3."""
     cmd = [
         "ffmpeg",
         "-hide_banner", "-loglevel", "error",
-        "-reconnect", "1",
-        "-reconnect_streamed", "1",
-        "-reconnect_delay_max", "10",
-        "-i", direct,
-        "-vn",
-        "-acodec", "libmp3lame",
-        "-q:a", "5",
+        "-i", src,
+        "-vn", "-ac", "1", "-ar", "16000", "-b:a", "64k",
         "-y", mp3_path,
     ]
-
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.DEVNULL,
@@ -163,6 +196,30 @@ async def extract_audio_from_url(url: str, kind: str) -> tuple[str, str, int | N
 
     if not os.path.exists(mp3_path) or os.path.getsize(mp3_path) == 0:
         raise ValueError("Аудио не извлечено (пустой файл)")
+
+
+async def extract_audio_from_url(url: str, kind: str) -> tuple[str, str, int | None]:
+    """Качает источник на диск и вытаскивает аудио. (mp3_path, title, size_bytes_or_None)."""
+    direct, name, size = await _resolve(url, kind)
+
+    if size and size > MAX_SOURCE_GB * 1024**3:
+        raise ValueError(
+            f"Файл слишком большой: {size / 1024**3:.1f} ГБ "
+            f"(макс {MAX_SOURCE_GB:g} ГБ)"
+        )
+
+    os.makedirs(TEMP_DIR, exist_ok=True)
+    token = uuid.uuid4().hex[:8]
+    ext_m = _EXT_RE.search(name)
+    src_path = os.path.join(TEMP_DIR, f"{token}.{ext_m.group(1) if ext_m else 'src'}")
+    mp3_path = os.path.join(TEMP_DIR, f"{token}.mp3")
+
+    try:
+        await _download(direct, src_path)
+        await _to_mp3(src_path, mp3_path)
+    finally:
+        if os.path.exists(src_path):
+            os.remove(src_path)
 
     title = os.path.splitext(name)[0] or name
     return mp3_path, title, size
