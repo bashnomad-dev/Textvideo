@@ -49,6 +49,11 @@ SUPADATA_JOB_TIMEOUT = int(os.getenv("SUPADATA_JOB_TIMEOUT", "180"))
 SUPADATA_POLL_INTERVAL = float(os.getenv("SUPADATA_POLL_INTERVAL", "4"))
 
 
+class TranscriptPending(Exception):
+    """Async-job субтитров не успел за таймаут. Сами субтитры есть — Supadata
+    продолжает обработку, повторный запрос чуть позже вернёт готовый результат."""
+
+
 def _content_to_text(content) -> str:
     """Нормализует поле content: строка (text=true) или массив чанков (async job)."""
     if isinstance(content, str):
@@ -78,11 +83,14 @@ async def _poll_supadata_job(session, job_id: str, headers: dict) -> str | None:
             log.warning("Supadata job %s failed", job_id)
             return None
     log.warning("Supadata job %s timed out after %ds", job_id, SUPADATA_JOB_TIMEOUT)
-    return None
+    raise TranscriptPending()
 
 
-async def fetch_youtube_transcript(url: str, lang: str = "ru") -> tuple[str, str] | None:
+async def fetch_youtube_transcript(url: str, lang: str = "ru", on_async=None) -> tuple[str, str] | None:
     """Получает транскрипт YouTube-видео через Supadata API.
+
+    on_async: опциональный async-колбэк без аргументов; вызывается один раз,
+    если видео ушло в асинхронную обработку (202) — чтобы обновить статус в UI.
 
     Returns:
         (текст, название видео) или None
@@ -113,6 +121,11 @@ async def fetch_youtube_transcript(url: str, lang: str = "ru") -> tuple[str, str
                         if not job_id:
                             log.warning("Supadata 202 without jobId for %s", video_id)
                             return None
+                        if on_async:
+                            try:
+                                await on_async()
+                            except Exception:
+                                pass
                         text = await _poll_supadata_job(session, job_id, headers)
                     elif resp.status == 200:
                         text = _content_to_text((await resp.json()).get("content", ""))
@@ -135,6 +148,8 @@ async def fetch_youtube_transcript(url: str, lang: str = "ru") -> tuple[str, str
             else:
                 log.error("Supadata API failed after %d attempts: %s", RETRY_MAX_ATTEMPTS, last_error)
                 return None
+        except TranscriptPending:
+            raise
         except Exception as e:
             log.exception("Supadata API failed for %s: %s", video_id, e)
             return None

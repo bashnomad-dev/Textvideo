@@ -13,7 +13,7 @@ from aiogram.enums import ParseMode
 from config import BOT_TOKEN, TEMP_DIR, MAX_FILE_SIZE_MB, FFMPEG_TIMEOUT
 from transcriber import transcribe
 from summarizer import summarize
-from downloader import extract_url, fetch_youtube_transcript, fetch_subtitles, download_audio, cleanup, _extract_youtube_id
+from downloader import extract_url, fetch_youtube_transcript, fetch_subtitles, download_audio, cleanup, _extract_youtube_id, TranscriptPending
 from cloud_downloader import detect_cloud_kind, extract_audio_from_url
 from rate_limit import check_rate_limit, seconds_until_reset
 
@@ -262,8 +262,15 @@ async def on_text(message: types.Message):
             return
 
         if is_youtube:
-            # YouTube — только через youtube-transcript-api (yt-dlp заблокирован)
-            result = await fetch_youtube_transcript(url)
+            # YouTube — через Supadata. Длинные видео идут в async-обработку,
+            # тогда меняем статус, чтобы не висело «Ищу субтитры» молча.
+            async def _on_async():
+                try:
+                    await status.edit_text("⏳ Видео длинное, готовлю субтитры — до пары минут…")
+                except Exception:
+                    pass
+
+            result = await fetch_youtube_transcript(url, on_async=_on_async)
             if result:
                 text, title = result
                 await send_result(message, text, title)
@@ -286,6 +293,11 @@ async def on_text(message: types.Message):
         await status.edit_text("⏳ Субтитров нет, скачиваю аудио...")
         audio_path, title = await download_audio(url)
         await process_and_reply(message, audio_path, title)
+    except TranscriptPending:
+        await message.reply(
+            "⏳ Видео длинное, субтитры ещё готовятся на стороне сервиса. "
+            "Пришли эту же ссылку ещё раз через 1–2 минуты — они уже будут готовы."
+        )
     except ValueError as e:
         await message.reply(f"Ошибка: {e}")
     except Exception as e:
