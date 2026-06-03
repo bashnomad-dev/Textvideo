@@ -42,6 +42,45 @@ def _extract_youtube_id(url: str) -> str | None:
     return match.group(1) if match else None
 
 
+SUPADATA_BASE = "https://api.supadata.ai/v1"
+# Видео длиннее ~20 мин Supadata обрабатывает асинхронно: отдаёт jobId (202),
+# результат надо опрашивать. Потолок ожидания и интервал опроса (сек).
+SUPADATA_JOB_TIMEOUT = int(os.getenv("SUPADATA_JOB_TIMEOUT", "180"))
+SUPADATA_POLL_INTERVAL = float(os.getenv("SUPADATA_POLL_INTERVAL", "4"))
+
+
+def _content_to_text(content) -> str:
+    """Нормализует поле content: строка (text=true) или массив чанков (async job)."""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        return " ".join(seg.get("text", "") for seg in content if seg.get("text")).strip()
+    return ""
+
+
+async def _poll_supadata_job(session, job_id: str, headers: dict) -> str | None:
+    """Опрашивает async-job субтитров до completed/failed. Возвращает текст или None."""
+    deadline = asyncio.get_event_loop().time() + SUPADATA_JOB_TIMEOUT
+    while asyncio.get_event_loop().time() < deadline:
+        await asyncio.sleep(SUPADATA_POLL_INTERVAL)
+        async with session.get(
+            f"{SUPADATA_BASE}/transcript/{job_id}",
+            headers=headers, timeout=aiohttp.ClientTimeout(total=30)
+        ) as resp:
+            if resp.status != 200:
+                log.warning("Supadata job poll returned %s for %s", resp.status, job_id)
+                return None
+            data = await resp.json()
+        status = data.get("status")
+        if status == "completed":
+            return _content_to_text(data.get("content", ""))
+        if status == "failed":
+            log.warning("Supadata job %s failed", job_id)
+            return None
+    log.warning("Supadata job %s timed out after %ds", job_id, SUPADATA_JOB_TIMEOUT)
+    return None
+
+
 async def fetch_youtube_transcript(url: str, lang: str = "ru") -> tuple[str, str] | None:
     """Получает транскрипт YouTube-видео через Supadata API.
 
@@ -63,18 +102,25 @@ async def fetch_youtube_transcript(url: str, lang: str = "ru") -> tuple[str, str
                 params = {"url": url, "text": "true", "lang": lang}
                 headers = {"x-api-key": SUPADATA_API_KEY}
                 async with session.get(
-                    "https://api.supadata.ai/v1/transcript",
+                    f"{SUPADATA_BASE}/transcript",
                     params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=30)
                 ) as resp:
                     if resp.status == 429 or resp.status >= 500:
                         raise aiohttp.ClientResponseError(resp.request_info, resp.history, status=resp.status, message=f"HTTP {resp.status}")
-                    if resp.status != 200:
+                    if resp.status == 202:
+                        # Длинное видео — асинхронная обработка, опрашиваем job.
+                        job_id = (await resp.json()).get("jobId")
+                        if not job_id:
+                            log.warning("Supadata 202 without jobId for %s", video_id)
+                            return None
+                        text = await _poll_supadata_job(session, job_id, headers)
+                    elif resp.status == 200:
+                        text = _content_to_text((await resp.json()).get("content", ""))
+                    else:
                         log.warning("Supadata API returned %s for %s", resp.status, video_id)
                         return None
-                    data = await resp.json()
 
-            text = data.get("content", "")
-            if not text or len(text.strip()) < 20:
+            if not text or len(text) < 20:
                 return None
 
             title = await _get_youtube_title(video_id)
