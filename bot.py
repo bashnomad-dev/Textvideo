@@ -7,11 +7,12 @@ import os
 import re
 import sys
 
+import aiohttp
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart
 from aiogram.enums import ParseMode
 
-from config import BOT_TOKEN, TEMP_DIR, MAX_FILE_SIZE_MB, FFMPEG_TIMEOUT
+from config import BOT_TOKEN, TEMP_DIR, MAX_FILE_SIZE_MB, FFMPEG_TIMEOUT, HEALTHCHECK_URL, HEALTHCHECK_INTERVAL
 from transcriber import transcribe
 from summarizer import summarize
 from downloader import extract_url, fetch_youtube_transcript, fetch_subtitles, download_audio, cleanup, _extract_youtube_id, TranscriptPending
@@ -320,10 +321,27 @@ async def on_text(message: types.Message):
             pass
 
 
+async def _healthcheck_loop():
+    """Dead-man switch: пингуем Healthchecks.io, пока живы. Молчание = алерт юзеру."""
+    if not HEALTHCHECK_URL:
+        log.info("Healthcheck отключён (HEALTHCHECK_URL не задан)")
+        return
+    log.info("Healthcheck включён, пинг каждые %d сек", HEALTHCHECK_INTERVAL)
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                async with session.get(HEALTHCHECK_URL, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    await resp.read()
+            except Exception as e:
+                log.warning("Healthcheck ping не удался: %s", e)
+            await asyncio.sleep(HEALTHCHECK_INTERVAL)
+
+
 async def main():
     version = os.getenv("APP_VERSION", "unknown")
     log.info("Бот запущен (v%s)", version)
     os.makedirs(TEMP_DIR, exist_ok=True)
+    asyncio.create_task(_healthcheck_loop())
     await dp.start_polling(bot)
 
 
