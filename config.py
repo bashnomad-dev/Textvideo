@@ -19,10 +19,6 @@ SUMMARY_MIN_CHARS = int(os.getenv("SUMMARY_MIN_CHARS", "400"))
 # Rate limiting: макс запросов на юзера в минуту
 RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "10"))
 
-# Мониторинг: ping-URL Healthchecks.io (dead-man switch). Пусто — выключено.
-HEALTHCHECK_URL = os.getenv("HEALTHCHECK_URL", "")
-HEALTHCHECK_INTERVAL = int(os.getenv("HEALTHCHECK_INTERVAL", "60"))
-
 # Retry: кол-во попыток и начальная задержка (сек)
 RETRY_MAX_ATTEMPTS = int(os.getenv("RETRY_MAX_ATTEMPTS", "3"))
 RETRY_BASE_DELAY = float(os.getenv("RETRY_BASE_DELAY", "1.0"))
