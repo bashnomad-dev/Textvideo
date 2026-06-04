@@ -7,7 +7,7 @@ import os
 import re
 import uuid
 import aiohttp
-from config import TEMP_DIR, MAX_FILE_SIZE_MB, SUPADATA_API_KEY, RETRY_MAX_ATTEMPTS, RETRY_BASE_DELAY, SUBPROCESS_TIMEOUT
+from config import TEMP_DIR, MAX_FILE_SIZE_MB, SUPADATA_API_KEY, RETRY_MAX_ATTEMPTS, RETRY_BASE_DELAY, SUBPROCESS_TIMEOUT, YTDLP_DOWNLOAD_TIMEOUT
 
 log = logging.getLogger(__name__)
 
@@ -274,6 +274,9 @@ async def download_audio(url: str) -> tuple[str, str]:
         # --print неявно включает --simulate → yt-dlp печатает title, но НЕ качает.
         # --no-simulate обязателен, иначе файл не появляется (молчаливый exit 0).
         "--no-simulate",
+        # Берём только аудиодорожку, если она есть отдельным потоком — качаем
+        # в разы меньше, чем полное видео. Иначе fallback на лучший доступный формат.
+        "-f", "bestaudio/best",
         "--extract-audio",
         "--audio-format", "mp3",
         "--audio-quality", "5",
@@ -289,10 +292,10 @@ async def download_audio(url: str) -> tuple[str, str]:
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=SUBPROCESS_TIMEOUT)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=YTDLP_DOWNLOAD_TIMEOUT)
     except asyncio.TimeoutError:
         proc.kill()
-        raise ValueError(f"Скачивание превысило таймаут ({SUBPROCESS_TIMEOUT} сек)")
+        raise ValueError(f"Скачивание превысило таймаут ({YTDLP_DOWNLOAD_TIMEOUT} сек)")
 
     stderr_text = stderr.decode().strip()
 

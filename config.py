@@ -26,3 +26,6 @@ RETRY_BASE_DELAY = float(os.getenv("RETRY_BASE_DELAY", "1.0"))
 # Таймауты для внешних процессов (сек)
 SUBPROCESS_TIMEOUT = int(os.getenv("SUBPROCESS_TIMEOUT", "120"))
 FFMPEG_TIMEOUT = int(os.getenv("FFMPEG_TIMEOUT", "60"))
+# Скачивание целого видео через yt-dlp (VK/Instagram/TikTok) — заметно дольше,
+# чем выборка субтитров, поэтому отдельный таймаут.
+YTDLP_DOWNLOAD_TIMEOUT = int(os.getenv("YTDLP_DOWNLOAD_TIMEOUT", "1200"))
