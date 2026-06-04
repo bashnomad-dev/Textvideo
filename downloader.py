@@ -186,6 +186,9 @@ async def fetch_subtitles(url: str, lang: str = "ru") -> tuple[str, str] | None:
         "yt-dlp",
         "--js-runtimes", "deno",
         "--skip-download",
+        # --print неявно включает --simulate, из-за чего субтитры не пишутся;
+        # --no-simulate возвращает запись файлов (само видео не качаем — --skip-download).
+        "--no-simulate",
         "--write-subs",
         "--write-auto-subs",
         "--sub-langs", f"{lang},en",
@@ -268,6 +271,9 @@ async def download_audio(url: str) -> tuple[str, str]:
     cmd = [
         "yt-dlp",
         "--js-runtimes", "deno",
+        # --print неявно включает --simulate → yt-dlp печатает title, но НЕ качает.
+        # --no-simulate обязателен, иначе файл не появляется (молчаливый exit 0).
+        "--no-simulate",
         "--extract-audio",
         "--audio-format", "mp3",
         "--audio-quality", "5",
