@@ -29,3 +29,7 @@ FFMPEG_TIMEOUT = int(os.getenv("FFMPEG_TIMEOUT", "60"))
 # Скачивание целого видео через yt-dlp (VK/Instagram/TikTok) — заметно дольше,
 # чем выборка субтитров, поэтому отдельный таймаут.
 YTDLP_DOWNLOAD_TIMEOUT = int(os.getenv("YTDLP_DOWNLOAD_TIMEOUT", "1200"))
+# Потолок на скачанную аудиодорожку. Транскрайбер сам режет большие файлы на
+# куски, так что лимит — про стоимость/время транскрипции, а не про размер
+# файла. mp3 q5 ~1 МБ/мин → 300 МБ ≈ 5 часов аудио.
+MAX_AUDIO_MB = int(os.getenv("MAX_AUDIO_MB", "300"))

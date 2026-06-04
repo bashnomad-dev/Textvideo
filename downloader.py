@@ -7,7 +7,7 @@ import os
 import re
 import uuid
 import aiohttp
-from config import TEMP_DIR, MAX_FILE_SIZE_MB, SUPADATA_API_KEY, RETRY_MAX_ATTEMPTS, RETRY_BASE_DELAY, SUBPROCESS_TIMEOUT, YTDLP_DOWNLOAD_TIMEOUT
+from config import TEMP_DIR, MAX_AUDIO_MB, SUPADATA_API_KEY, RETRY_MAX_ATTEMPTS, RETRY_BASE_DELAY, SUBPROCESS_TIMEOUT, YTDLP_DOWNLOAD_TIMEOUT
 
 log = logging.getLogger(__name__)
 
@@ -316,9 +316,9 @@ async def download_audio(url: str) -> tuple[str, str]:
             raise ValueError(f"Файл не появился после скачивания. yt-dlp: {hint}")
 
     size_mb = os.path.getsize(actual_path) / (1024 * 1024)
-    if size_mb > MAX_FILE_SIZE_MB:
+    if size_mb > MAX_AUDIO_MB:
         os.remove(actual_path)
-        raise ValueError(f"Аудиодорожка слишком большая: {size_mb:.1f} МБ (макс {MAX_FILE_SIZE_MB} МБ)")
+        raise ValueError(f"Аудиодорожка слишком большая: {size_mb:.1f} МБ (макс {MAX_AUDIO_MB} МБ)")
 
     return actual_path, title
 
