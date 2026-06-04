@@ -1,6 +1,7 @@
 """Telegram-бот для транскрибации аудио, видео и ссылок в текст."""
 
 import asyncio
+import html
 import logging
 import os
 import re
@@ -93,17 +94,41 @@ async def send_result(message: types.Message, transcript: str, title: str = ""):
     """Отправляет саммари (если доступно) в чат + полный транскрипт файлом .txt."""
     summary = await summarize(transcript, title)
 
-    head = f"📝 <b>{title}</b>\n\n" if title else ""
-    body = summary if summary else transcript
+    head = f"📝 <b>{html.escape(title)}</b>\n\n" if title else ""
+    body = html.escape(summary if summary else transcript)
     for i, part in enumerate(split_text(head + body)):
         if i == 0:
             await message.reply(part, parse_mode=ParseMode.HTML)
         else:
-            await message.answer(part)
+            await message.answer(part, parse_mode=ParseMode.HTML)
 
     # Полный транскрипт — всегда отдельным файлом
     doc = types.BufferedInputFile(transcript.encode("utf-8"), filename=f"{_safe_filename(title)}.txt")
     await message.answer_document(doc, caption="Полный транскрипт")
+
+
+async def _safe_delete(msg: types.Message):
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
+
+async def handle_tg_media(message: types.Message, status_text: str, file_id: str, ext: str, title: str):
+    """Скачивает файл из Telegram и транскрибирует, гарантированно убирая статус.
+
+    Скачивание вынесено в try: если Telegram отдаёт ошибку (например, файл >20 МБ),
+    статус-сообщение не зависает, а юзер получает понятную ошибку.
+    """
+    status = await message.reply(status_text)
+    try:
+        path = await download_tg_file(file_id, ext)
+        await process_and_reply(message, path, title)
+    except Exception as e:
+        log.exception("Не удалось скачать файл из Telegram")
+        await message.reply(f"Не удалось скачать файл: {e}")
+    finally:
+        await _safe_delete(status)
 
 
 async def process_and_reply(message: types.Message, file_path: str, source: str = ""):
@@ -159,20 +184,14 @@ async def cmd_start(message: types.Message):
 async def on_voice(message: types.Message):
     if not await rate_limit_guard(message):
         return
-    status = await message.reply("⏳ Распознаю голосовое...")
-    path = await download_tg_file(message.voice.file_id, "ogg")
-    await process_and_reply(message, path, "Голосовое сообщение")
-    await status.delete()
+    await handle_tg_media(message, "⏳ Распознаю голосовое...", message.voice.file_id, "ogg", "Голосовое сообщение")
 
 
 @dp.message(F.video_note)
 async def on_video_note(message: types.Message):
     if not await rate_limit_guard(message):
         return
-    status = await message.reply("⏳ Распознаю видеосообщение...")
-    path = await download_tg_file(message.video_note.file_id, "mp4")
-    await process_and_reply(message, path, "Видеосообщение")
-    await status.delete()
+    await handle_tg_media(message, "⏳ Распознаю видеосообщение...", message.video_note.file_id, "mp4", "Видеосообщение")
 
 
 @dp.message(F.audio)
@@ -182,12 +201,9 @@ async def on_audio(message: types.Message):
     if message.audio.file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
         await message.reply(TOO_BIG_MSG)
         return
-    status = await message.reply("⏳ Распознаю аудио...")
     ext = (message.audio.file_name or "audio.mp3").rsplit(".", 1)[-1]
-    path = await download_tg_file(message.audio.file_id, ext)
     title = message.audio.title or message.audio.file_name or "Аудио"
-    await process_and_reply(message, path, title)
-    await status.delete()
+    await handle_tg_media(message, "⏳ Распознаю аудио...", message.audio.file_id, ext, title)
 
 
 @dp.message(F.video)
@@ -197,10 +213,7 @@ async def on_video(message: types.Message):
     if message.video.file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
         await message.reply(TOO_BIG_MSG)
         return
-    status = await message.reply("⏳ Распознаю видео...")
-    path = await download_tg_file(message.video.file_id, "mp4")
-    await process_and_reply(message, path, "Видео")
-    await status.delete()
+    await handle_tg_media(message, "⏳ Распознаю видео...", message.video.file_id, "mp4", "Видео")
 
 
 @dp.message(F.document)
@@ -220,11 +233,8 @@ async def on_document(message: types.Message):
         await message.reply(TOO_BIG_MSG)
         return
 
-    status = await message.reply("⏳ Распознаю файл...")
     ext = name.rsplit(".", 1)[-1]
-    path = await download_tg_file(doc.file_id, ext)
-    await process_and_reply(message, path, doc.file_name or "Файл")
-    await status.delete()
+    await handle_tg_media(message, "⏳ Распознаю файл...", doc.file_id, ext, doc.file_name or "Файл")
 
 
 @dp.message(F.text)
