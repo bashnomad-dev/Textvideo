@@ -287,9 +287,9 @@ async def on_text(message: types.Message):
                 await status.delete()
                 return
             else:
-                await message.reply("Не удалось получить субтитры для этого видео. Возможно, у него нет субтитров.")
-                await status.delete()
-                return
+                await status.edit_text("⏳ Субтитров нет, скачиваю аудио...")
+                audio_path, title = await download_audio(url)
+                await process_and_reply(message, audio_path, title)
 
         # Не-YouTube: пробуем yt-dlp субтитры, потом скачивание аудио
         result = await fetch_subtitles(url)
