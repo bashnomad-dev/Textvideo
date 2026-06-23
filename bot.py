@@ -30,6 +30,16 @@ TOO_BIG_MSG = (
     "и пришли ссылку сюда — размер не ограничен, я сам вытащу аудио."
 )
 
+# Подсказка для ссылок, которые не скачать (защищённые плееры обучающих платформ —
+# GetCourse и т.п.: поток подписан под сессию, плоского URL видео нет).
+PROTECTED_HINT = (
+    "\n\n🔒 Если это видео из обучающей платформы (GetCourse и подобные) — оно в защищённом "
+    "плеере, скачать по ссылке нельзя.\n"
+    "Запиши звук урока (можно ускорить плеер до 2x) и пришли аудиофайлом. "
+    "Файл больше 20 МБ — залей на Google Drive / Яндекс.Диск / Dropbox и пришли ссылку: "
+    "так быстрее и без ограничения по размеру."
+)
+
 
 # --- Helpers ---
 
@@ -301,7 +311,11 @@ async def on_text(message: types.Message):
 
         # Субтитров нет — скачиваем аудио и транскрибируем
         await status.edit_text("⏳ Субтитров нет, скачиваю аудио...")
-        audio_path, title = await download_audio(url)
+        try:
+            audio_path, title = await download_audio(url)
+        except ValueError as e:
+            await message.reply(f"Не удалось скачать видео по ссылке: {e}{PROTECTED_HINT}")
+            return
         await process_and_reply(message, audio_path, title)
     except TranscriptPending:
         await message.reply(
