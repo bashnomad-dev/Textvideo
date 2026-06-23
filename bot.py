@@ -300,6 +300,7 @@ async def on_text(message: types.Message):
                 await status.edit_text("⏳ Субтитров нет, скачиваю аудио...")
                 audio_path, title = await download_audio(url)
                 await process_and_reply(message, audio_path, title)
+                return
 
         # Не-YouTube: пробуем yt-dlp субтитры, потом скачивание аудио
         result = await fetch_subtitles(url)
